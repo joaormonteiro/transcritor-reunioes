@@ -1,0 +1,6 @@
+pyaudiowpatch
+sounddevice
+numpy
+scipy
+whisperx
+python-dotenv
