@@ -77,10 +77,11 @@ def mix_and_save(path):
 
 
 def transcribe(wav_path, output_path):
-    device = "cpu"  # trocar por "cuda" se tiver GPU NVIDIA
+    device = "cuda"
+    compute_type = "float16"
 
     print("Carregando modelo Whisper...")
-    model = whisperx.load_model("medium", device, compute_type="int8")
+    model = whisperx.load_model("medium", device, compute_type=compute_type)
     audio = whisperx.load_audio(wav_path)
     result = model.transcribe(audio, language="pt")
 
