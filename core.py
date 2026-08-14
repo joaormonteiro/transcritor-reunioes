@@ -15,7 +15,10 @@ import pyaudiowpatch as pyaudio
 import sounddevice as sd
 import numpy as np
 import scipy.io.wavfile as wav
+import scipy.signal
 import threading
+import time
+from fractions import Fraction
 from datetime import datetime
 from dotenv import load_dotenv
 import whisperx
@@ -43,6 +46,8 @@ class Recorder:
         self._t_mic = None
         self._t_loop = None
         self.loopback_found = True
+        self._loop_channels = 2
+        self._loop_rate = 48000
 
     def _record_mic(self):
         def callback(indata, frames, time, status):
@@ -55,27 +60,39 @@ class Recorder:
 
     def _record_loopback(self):
         p = pyaudio.PyAudio()
-        loopback_device = None
-        for i in range(p.get_device_count()):
-            info = p.get_device_info_by_index(i)
-            if info.get('isLoopbackDevice'):
-                loopback_device = i
-                break
-        if loopback_device is None:
+        try:
+            device_info = p.get_default_wasapi_loopback()
+        except (OSError, LookupError):
             self.loopback_found = False
             p.terminate()
             return
+
+        # WASAPI loopback não faz resample/downmix sozinho: precisa abrir no
+        # formato nativo do dispositivo (normalmente estéreo, 44100/48000Hz) —
+        # abrir forçando mono/16kHz direto captura só ruído/silêncio.
+        self._loop_channels = int(device_info["maxInputChannels"]) or 2
+        self._loop_rate = int(device_info["defaultSampleRate"])
+
+        def callback(in_data, frame_count, time_info, status):
+            if self.recording:
+                self.loopback_chunks.append(np.frombuffer(in_data, dtype=DTYPE))
+            return (None, pyaudio.paContinue)
+
+        # Modo callback (não-bloqueante): com leitura bloqueante (stream.read),
+        # se o áudio do sistema fica em silêncio o read() trava esperando dados
+        # e nunca percebe que recording=False — o app fica preso ao "Parar".
         stream = p.open(
             format=pyaudio.paFloat32,
-            channels=CHANNELS,
-            rate=SAMPLE_RATE,
+            channels=self._loop_channels,
+            rate=self._loop_rate,
             input=True,
-            input_device_index=loopback_device,
-            frames_per_buffer=1024
+            input_device_index=device_info["index"],
+            frames_per_buffer=1024,
+            stream_callback=callback,
         )
+        stream.start_stream()
         while self.recording:
-            data = stream.read(1024, exception_on_overflow=False)
-            self.loopback_chunks.append(np.frombuffer(data, dtype=DTYPE))
+            time.sleep(0.1)
         stream.stop_stream()
         stream.close()
         p.terminate()
@@ -98,8 +115,20 @@ class Recorder:
         self.recording = False
         self.wait()
 
-        mic = np.concatenate(self.mic_chunks) if self.mic_chunks else np.array([], dtype=DTYPE)
-        loop = np.concatenate(self.loopback_chunks) if self.loopback_chunks else np.array([], dtype=DTYPE)
+        mic = np.concatenate(self.mic_chunks).reshape(-1) if self.mic_chunks else np.array([], dtype=DTYPE)
+        loop_raw = np.concatenate(self.loopback_chunks) if self.loopback_chunks else np.array([], dtype=DTYPE)
+
+        loop = np.array([], dtype=DTYPE)
+        if len(loop_raw):
+            channels = max(self._loop_channels, 1)
+            usable_len = (len(loop_raw) // channels) * channels
+            loop_mono = loop_raw[:usable_len].reshape(-1, channels).mean(axis=1).astype(DTYPE)
+            if self._loop_rate != SAMPLE_RATE:
+                ratio = Fraction(SAMPLE_RATE, self._loop_rate).limit_denominator(1000)
+                loop_mono = scipy.signal.resample_poly(
+                    loop_mono, ratio.numerator, ratio.denominator
+                ).astype(DTYPE)
+            loop = loop_mono
 
         if len(mic) and len(loop):
             min_len = min(len(mic), len(loop))

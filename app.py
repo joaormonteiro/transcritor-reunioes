@@ -97,8 +97,14 @@ class App:
             self._set_status(f"Concluído: {os.path.basename(md_path)}")
         except Exception as e:
             traceback.print_exc()
+            try:
+                with open(os.path.join(APP_DIR, "error.log"), "a", encoding="utf-8") as log:
+                    log.write(f"\n--- {datetime.now()} ---\n")
+                    log.write(traceback.format_exc())
+            except Exception:
+                pass
             self._set_status("Erro na transcrição — veja detalhes.")
-            self._show_error(str(e))
+            self._show_error(str(e) + "\n\n(detalhes completos em error.log)")
         finally:
             self._reset_button()
 
@@ -124,7 +130,39 @@ class App:
         self.root.destroy()
 
 
+def _selftest():
+    """Roda a transcrição numa onda sintética e grava o resultado/erro em log,
+    sem precisar da interface — usado para depurar o build empacotado."""
+    import numpy as np
+    import scipy.io.wavfile as wav_mod
+
+    log_path = os.path.join(APP_DIR, "selftest.log")
+    with open(log_path, "w", encoding="utf-8") as log:
+        def w(msg):
+            log.write(str(msg) + "\n")
+            log.flush()
+
+        try:
+            sr = 16000
+            t = np.linspace(0, 2, sr * 2, endpoint=False)
+            tone = (0.1 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+            wav_path = os.path.join(APP_DIR, "selftest.wav")
+            md_path = os.path.join(APP_DIR, "selftest.md")
+            wav_mod.write(wav_path, sr, tone)
+            w("WAV_OK")
+
+            from core import transcribe as _transcribe
+            _transcribe(wav_path, md_path, progress=w)
+            w("SELFTEST_OK")
+        except Exception:
+            w("SELFTEST_FAIL")
+            w(traceback.format_exc())
+
+
 if __name__ == "__main__":
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    if "--selftest" in sys.argv:
+        _selftest()
+    else:
+        root = tk.Tk()
+        App(root)
+        root.mainloop()
